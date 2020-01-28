@@ -1,45 +1,131 @@
-﻿using Bit.ConsoleApp.Repository;
+﻿using Bit.ConsoleApp.IO;
+using Bit.ConsoleApp.Repository;
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Globalization;
 using System.Text;
 
 namespace Bit.ConsoleApp
 {
-    public struct FileInfo
+    [Flags]
+    public enum FileListDifferences
     {
-        public string Name { get; }
+        None,
+        LeftMissing = 1,
+        RightMissing = 2,
+        IsDirectoryMismatch = 4,
+        LengthMismatch = 8,
+        CreationTimeMismatch = 16,
+        LastWriteTimeMismatch = 32
+    }
 
-        public bool IsDirectory { get; }
+    public struct FileListDifference
+    {
+        public IFileInfo Left { get; set; }
 
-        public long Length { get; }
+        public IFileInfo Right { get; set; }
 
-        public DateTime CreationTimeUtc { get; }
+        public FileListDifferences Difference { get; set; }
 
-        public DateTime LastWriteTimeUtc { get; }
-
-        public FileInfo(
-            string name,
-            bool isDirectory,
-            long length,
-            DateTime creationTimeUtc,
-            DateTime lastWriteTimeUtc)
+        public FileListDifference(IFileInfo left, IFileInfo right, FileListDifferences difference)
         {
-            Name = name;
-            IsDirectory = isDirectory;
-            Length = length;
-            CreationTimeUtc = creationTimeUtc;
-            LastWriteTimeUtc = lastWriteTimeUtc;
+            Left = left;
+            Right = right;
+            Difference = difference;
         }
+    }
 
-        public override string ToString()
-            => Name;
+    public interface IFileInfo
+    {
+        string Name { get; }
+
+        bool IsDirectory { get; }
+
+        long Length { get; }
+
+        DateTime CreationTimeUtc { get; }
+
+        DateTime LastWriteTimeUtc { get; }
+
+        string FullPath { get; }
     }
 
     public class FileList
     {
+        private class FileInfo : IFileInfo
+        {
+            private string _fullPath;
+
+            public FileListNode Node { get; set; }
+
+            public string Name { get; }
+
+            public bool IsDirectory { get; }
+
+            public long Length { get; }
+
+            public DateTime CreationTimeUtc { get; }
+
+            public DateTime LastWriteTimeUtc { get; }
+
+            public string FullPath
+            {
+                get
+                {
+                    if (_fullPath == null)
+                        _fullPath = CalculateFullPath();
+
+                    return _fullPath;
+                }
+            }
+
+            public FileInfo(
+                string name,
+                bool isDirectory,
+                long length,
+                DateTime creationTimeUtc,
+                DateTime lastWriteTimeUtc)
+            {
+                _fullPath = null;
+                Node = null;
+                Name = name;
+                IsDirectory = isDirectory;
+                Length = length;
+                CreationTimeUtc = creationTimeUtc;
+                LastWriteTimeUtc = lastWriteTimeUtc;
+            }
+
+            public override string ToString()
+                => Name;
+
+            private string CalculateFullPath()
+            {
+                var reversed_parts = new List<ReadOnlyMemory<char>>();
+                for (var node = Node; node != null; node = node.Parent)
+                {
+                    if (node.Parent == null) // dont include the root node
+                        break;
+
+                    reversed_parts.Add(node.FileInfo.Name.AsMemory());
+                }
+
+                var sb = new StringBuilder(256);
+                for (int i = reversed_parts.Count - 1; i >= 0; i--)
+                {
+                    if (sb.Length != 0)
+                        sb.Append('/');
+
+                    sb.Append(reversed_parts[i]);
+                }
+
+                return sb.ToString();
+            }
+        }
+
         private class FileListNode
         {
+            public Guid Id { get; }
+
             public FileListNode Parent { get; }
 
             public FileInfo FileInfo { get; }
@@ -58,8 +144,11 @@ namespace Bit.ConsoleApp
 
             public FileListNode(FileListNode parent, FileInfo fileInfo)
             {
+                Id = Guid.NewGuid();
                 Parent = parent;
                 FileInfo = fileInfo;
+
+                fileInfo.Node = this;
             }
 
             public override string ToString()
@@ -83,6 +172,17 @@ namespace Bit.ConsoleApp
                 node.Previous = LastChild;
                 LastChild = node;
             }
+
+            public FileListNode FindChild(string name)
+            {
+                for (var node = FirstChild; node != null; node = node.Next)
+                {
+                    if (string.Compare(node.FileInfo.Name, name, false, CultureInfo.InvariantCulture) == 0)
+                        return node;
+                }
+
+                return null;
+            }
         }
 
         private readonly FileListNode _root = new FileListNode(null, new FileInfo("root", true, 0, new DateTime(0), new DateTime(0)));
@@ -91,7 +191,7 @@ namespace Bit.ConsoleApp
         {
         }
 
-        public bool TryGetFileInfo(string path, out FileInfo fileInfo)
+        public bool TryGetFileInfo(string path, out IFileInfo fileInfo)
         {
             var parts = Utilities.SplitPathIntoParts(path.AsMemory());
             var root = _root;
@@ -112,28 +212,141 @@ namespace Bit.ConsoleApp
                     break;
             }
 
-            fileInfo = root?.FileInfo ?? new FileInfo();
+            fileInfo = root?.FileInfo;
             return root != null;
+        }
+
+        private void RecursiveWriteStream(System.IO.BinaryWriter bw, FileListNode node)
+        {
+            var offset = bw.BaseStream.Position;
+            bw.Write(0); // pad count to write to later
+            var count = 0;
+            for (var child = node.FirstChild; child != null; child = child.Next)
+            {
+                bw.Write(child.FileInfo.Name);
+                bw.Write(child.FileInfo.IsDirectory);
+                bw.Write(child.FileInfo.Length);
+                bw.Write(child.FileInfo.CreationTimeUtc.Ticks);
+                bw.Write(child.FileInfo.LastWriteTimeUtc.Ticks);
+                if (child.FileInfo.IsDirectory)
+                    RecursiveWriteStream(bw, child);
+
+                ++count;
+            }
+
+            bw.Seek((int)offset, System.IO.SeekOrigin.Begin);
+            bw.Write(count);
+            bw.Seek(0, System.IO.SeekOrigin.End);
+        }
+
+        public void Save(IStorageDevice storageDevice, string path)
+        {
+            using (var stream = storageDevice.Open(path, System.IO.FileMode.Create))
+            using (var bw = new System.IO.BinaryWriter(stream, Encoding.UTF8, true))
+            {
+                RecursiveWriteStream(bw, _root);
+            }
+        }
+
+        private bool CompareDifferences(FileInfo left, FileInfo right, out FileListDifference difference)
+        {
+            var differences = FileListDifferences.None;
+
+            if (left.IsDirectory != right.IsDirectory)
+                differences |= FileListDifferences.IsDirectoryMismatch;
+
+            if (left.Length != right.Length)
+                differences |= FileListDifferences.LengthMismatch;
+
+            if (left.CreationTimeUtc != right.CreationTimeUtc)
+                differences |= FileListDifferences.CreationTimeMismatch;
+
+            if (left.LastWriteTimeUtc != right.LastWriteTimeUtc)
+                differences |= FileListDifferences.LastWriteTimeMismatch;
+
+            difference = new FileListDifference(left, right, differences);
+            return difference.Difference == FileListDifferences.None;
+        }
+
+        private void RecursiveCompareTo(List<FileListDifference> differences, FileListNode left, FileListNode right)
+        {
+            // check to make sure we're not comparing two objects twice
+            var check = new HashSet<Guid>();
+
+            for (var node = left.FirstChild; node != null; node = node.Next)
+            {
+                check.Clear();
+
+                var find = right.FindChild(node.FileInfo.Name);
+                if (find != null)
+                {
+                    check.Add(find.Id);
+                    if (node.FileInfo.IsDirectory)
+                        RecursiveCompareTo(differences, node, find);
+                    else if (!CompareDifferences(node.FileInfo, find.FileInfo, out FileListDifference diff))
+                        differences.Add(diff);
+                }
+                else
+                {
+                    differences.Add(new FileListDifference()
+                    {
+                        Difference = FileListDifferences.RightMissing,
+                        Left = node.FileInfo
+                    });
+                    continue;
+                }
+            }
+
+            for (var node = right.FirstChild; node != null; node = node.Next)
+            {
+                if (check.Contains(node.Id))
+                    continue;
+
+                var find = left.FindChild(node.FileInfo.Name);
+                if (find != null)
+                {
+                    if (node.FileInfo.IsDirectory)
+                        RecursiveCompareTo(differences, find, node);
+                    else if (!CompareDifferences(find.FileInfo, node.FileInfo, out FileListDifference diff))
+                        differences.Add(diff);
+                }
+                else
+                {
+                    differences.Add(new FileListDifference()
+                    {
+                        Difference = FileListDifferences.LeftMissing,
+                        Right = node.FileInfo
+                    });
+                    continue;
+                }
+            }
+        }
+
+        public IEnumerable<FileListDifference> CompareTo(FileList other)
+        {
+            var differences = new List<FileListDifference>();
+            RecursiveCompareTo(differences, _root, other._root);
+            return differences;
         }
 
         // static
 
         private static void RecursiveReadFolder(FileListNode parent, string path)
         {
-            foreach (var folder in Directory.GetDirectories(path))
+            foreach (var folder in System.IO.Directory.GetDirectories(path))
             {
-                var node = new FileListNode(parent, new FileInfo(Path.GetFileName(folder), true, 0, new DateTime(0), new DateTime(0)));
+                var node = new FileListNode(parent, new FileInfo(System.IO.Path.GetFileName(folder), true, 0, new DateTime(0), new DateTime(0)));
                 parent.AddChild(node);
                 RecursiveReadFolder(node, folder);
             }
 
-            foreach (var filename in Directory.GetFiles(path))
+            foreach (var filename in System.IO.Directory.GetFiles(path))
             {
                 var fi = new System.IO.FileInfo(filename);
 
                 parent.AddChild(new FileListNode(parent,
                     new FileInfo(
-                        Path.GetFileName(filename),
+                        System.IO.Path.GetFileName(filename),
                         false,
                         fi.Length,
                         fi.CreationTimeUtc,
@@ -141,18 +354,50 @@ namespace Bit.ConsoleApp
             }
         }
 
+        private static void RecursiveReadStream(System.IO.BinaryReader br, FileListNode parent)
+        {
+            var count = br.ReadInt32();
+            for (int i = 0; i < count; i++)
+            {
+                var name = br.ReadString();
+                var isDirectory = br.ReadBoolean();
+                var length = br.ReadInt64();
+                var creationTimeUtc = DateTime.SpecifyKind(new DateTime(br.ReadInt64()), DateTimeKind.Utc);
+                var lastWriteTimeUtc = DateTime.SpecifyKind(new DateTime(br.ReadInt64()), DateTimeKind.Utc);
+
+                var fileInfo = new FileInfo(name, isDirectory, length, creationTimeUtc, lastWriteTimeUtc);
+                var node = new FileListNode(parent, fileInfo);
+                parent.AddChild(node);
+
+                if (fileInfo.IsDirectory)
+                    RecursiveReadStream(br, node);
+            }
+        }
+
         public static FileList FromFolder(string path)
         {
-            path = Path.GetFullPath(path);
+            path = System.IO.Path.GetFullPath(path);
 
             var fileList = new FileList();
             RecursiveReadFolder(fileList._root, path);
             return fileList;
         }
 
-        public static FileList FromRepository(IBitRepository repository)
+        public static FileList FromRepositoryIndex(IStorageDevice storageDevice, string path)
         {
-            throw new NotImplementedException();
+            path = System.IO.Path.GetFullPath(path);
+
+            var fileList = new FileList();
+            if (System.IO.File.Exists(path))
+            {
+                using (var stream = storageDevice.Open(path, System.IO.FileMode.Open))
+                using (var br = new System.IO.BinaryReader(stream, Encoding.UTF8, true))
+                {
+                    RecursiveReadStream(br, fileList._root);
+                }
+            }
+
+            return fileList;
         }
     }
 }

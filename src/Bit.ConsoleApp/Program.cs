@@ -25,13 +25,6 @@ namespace Bit.ConsoleApp
             var args = new ReadOnlySpan<string>(args_);
             var config = new AppConfigurationImpl();
 
-            var list = FileList.FromFolder(@"D:\Coding\C#\2020");
-
-            if (list.TryGetFileInfo("bit/README.md", out FileInfo fi))
-            {
-                int d = 0;
-            }
-
 #if DEBUG
             config.EnableDebugLog = true;
 #endif

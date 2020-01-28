@@ -36,14 +36,17 @@ namespace Bit.ConsoleApp.Repository
         public IEnumerable<string> GetPendingChanges()
         {
             var physical_list = FileList.FromFolder(_repositoryPath);
-            //var repository_list = FileList.FromRepository(this);
+            var index_list = FileList.FromRepositoryIndex(_storageDevice, Path.Combine(_repositoryPath, "index"));
+
+            var differences = physical_list.CompareTo(index_list);
+            
 
 
             throw new NotImplementedException();
         }
 
         // stage
-        
+
         // unstage/reset
 
         // commit

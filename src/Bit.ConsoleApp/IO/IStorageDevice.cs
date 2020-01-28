@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 
 namespace Bit.ConsoleApp.IO
@@ -17,5 +18,7 @@ namespace Bit.ConsoleApp.IO
         string ReadAllText(string path);
 
         void WriteAllText(string path, string text);
+
+        Stream Open(string path, FileMode fileMode);
     }
 }

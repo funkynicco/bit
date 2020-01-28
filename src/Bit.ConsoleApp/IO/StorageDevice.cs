@@ -58,5 +58,19 @@ namespace Bit.ConsoleApp.IO
 
         public void WriteAllText(string path, string text)
             => WriteAllBytes(path, _encoding.GetBytes(text));
+
+        public Stream Open(string path, FileMode fileMode)
+        {
+            var stream = File.Open(path, fileMode, FileAccess.ReadWrite, FileShare.Read);
+            switch (fileMode)
+            {
+                case FileMode.Create:
+                case FileMode.CreateNew:
+                    _logger.Trace($"Created file: {path}");
+                    break;
+            }
+
+            return stream;
+        }
     }
 }
