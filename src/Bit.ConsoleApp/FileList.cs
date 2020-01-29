@@ -52,11 +52,25 @@ namespace Bit.ConsoleApp
 
     public class FileList
     {
-        private class FileInfo : IFileInfo
+        private class FileListNode : IFileInfo
         {
             private string _fullPath;
 
-            public FileListNode Node { get; set; }
+            public Guid Id { get; }
+
+            public FileListNode Parent { get; }
+
+            public FileListNode Previous { get; private set; }
+
+            public FileListNode Next { get; private set; }
+
+            public FileListNode FirstChild { get; private set; }
+
+            public FileListNode LastChild { get; private set; }
+
+            public int SubfolderCount { get; private set; }
+
+            public int FileCount { get; private set; }
 
             public string Name { get; }
 
@@ -79,15 +93,16 @@ namespace Bit.ConsoleApp
                 }
             }
 
-            public FileInfo(
+            public FileListNode(
+                FileListNode parent,
                 string name,
                 bool isDirectory,
                 long length,
                 DateTime creationTimeUtc,
                 DateTime lastWriteTimeUtc)
             {
-                _fullPath = null;
-                Node = null;
+                Id = Guid.NewGuid();
+                Parent = parent;
                 Name = name;
                 IsDirectory = isDirectory;
                 Length = length;
@@ -98,65 +113,9 @@ namespace Bit.ConsoleApp
             public override string ToString()
                 => Name;
 
-            private string CalculateFullPath()
-            {
-                var reversed_parts = new List<ReadOnlyMemory<char>>();
-                for (var node = Node; node != null; node = node.Parent)
-                {
-                    if (node.Parent == null) // dont include the root node
-                        break;
-
-                    reversed_parts.Add(node.FileInfo.Name.AsMemory());
-                }
-
-                var sb = new StringBuilder(256);
-                for (int i = reversed_parts.Count - 1; i >= 0; i--)
-                {
-                    if (sb.Length != 0)
-                        sb.Append('/');
-
-                    sb.Append(reversed_parts[i]);
-                }
-
-                return sb.ToString();
-            }
-        }
-
-        private class FileListNode
-        {
-            public Guid Id { get; }
-
-            public FileListNode Parent { get; }
-
-            public FileInfo FileInfo { get; }
-
-            public FileListNode Previous { get; private set; }
-
-            public FileListNode Next { get; private set; }
-
-            public FileListNode FirstChild { get; private set; }
-
-            public FileListNode LastChild { get; private set; }
-
-            public int SubfolderCount { get; private set; }
-
-            public int FileCount { get; private set; }
-
-            public FileListNode(FileListNode parent, FileInfo fileInfo)
-            {
-                Id = Guid.NewGuid();
-                Parent = parent;
-                FileInfo = fileInfo;
-
-                fileInfo.Node = this;
-            }
-
-            public override string ToString()
-                => FileInfo.ToString();
-
             public void AddChild(FileListNode node)
             {
-                if (node.FileInfo.IsDirectory)
+                if (node.IsDirectory)
                     ++SubfolderCount;
                 else
                     ++FileCount;
@@ -177,15 +136,38 @@ namespace Bit.ConsoleApp
             {
                 for (var node = FirstChild; node != null; node = node.Next)
                 {
-                    if (string.Compare(node.FileInfo.Name, name, false, CultureInfo.InvariantCulture) == 0)
+                    if (string.Compare(node.Name, name, false, CultureInfo.InvariantCulture) == 0)
                         return node;
                 }
 
                 return null;
             }
+
+            private string CalculateFullPath()
+            {
+                var reversed_parts = new List<ReadOnlyMemory<char>>();
+                for (var node = this; node != null; node = node.Parent)
+                {
+                    if (node.Parent == null) // dont include the root node
+                        break;
+
+                    reversed_parts.Add(node.Name.AsMemory());
+                }
+
+                var sb = new StringBuilder(256);
+                for (int i = reversed_parts.Count - 1; i >= 0; i--)
+                {
+                    if (sb.Length != 0)
+                        sb.Append('/');
+
+                    sb.Append(reversed_parts[i]);
+                }
+
+                return sb.ToString();
+            }
         }
 
-        private readonly FileListNode _root = new FileListNode(null, new FileInfo("root", true, 0, new DateTime(0), new DateTime(0)));
+        private readonly FileListNode _root = new FileListNode(null, "root", true, 0, new DateTime(0), new DateTime(0));
 
         private FileList()
         {
@@ -201,7 +183,7 @@ namespace Bit.ConsoleApp
                 var child = root.FirstChild;
                 for (; child != null; child = child.Next)
                 {
-                    if (part.Span.CompareTo(child.FileInfo.Name.AsSpan(), StringComparison.InvariantCultureIgnoreCase) != 0)
+                    if (part.Span.CompareTo(child.Name.AsSpan(), StringComparison.InvariantCultureIgnoreCase) != 0)
                         continue;
 
                     root = child;
@@ -212,7 +194,7 @@ namespace Bit.ConsoleApp
                     break;
             }
 
-            fileInfo = root?.FileInfo;
+            fileInfo = root;
             return root != null;
         }
 
@@ -223,12 +205,12 @@ namespace Bit.ConsoleApp
             var count = 0;
             for (var child = node.FirstChild; child != null; child = child.Next)
             {
-                bw.Write(child.FileInfo.Name);
-                bw.Write(child.FileInfo.IsDirectory);
-                bw.Write(child.FileInfo.Length);
-                bw.Write(child.FileInfo.CreationTimeUtc.Ticks);
-                bw.Write(child.FileInfo.LastWriteTimeUtc.Ticks);
-                if (child.FileInfo.IsDirectory)
+                bw.Write(child.Name);
+                bw.Write(child.IsDirectory);
+                bw.Write(child.Length);
+                bw.Write(child.CreationTimeUtc.Ticks);
+                bw.Write(child.LastWriteTimeUtc.Ticks);
+                if (child.IsDirectory)
                     RecursiveWriteStream(bw, child);
 
                 ++count;
@@ -248,7 +230,7 @@ namespace Bit.ConsoleApp
             }
         }
 
-        private bool CompareDifferences(FileInfo left, FileInfo right, out FileListDifference difference)
+        private bool CompareDifferences(IFileInfo left, IFileInfo right, out FileListDifference difference)
         {
             var differences = FileListDifferences.None;
 
@@ -277,13 +259,13 @@ namespace Bit.ConsoleApp
             {
                 check.Clear();
 
-                var find = right.FindChild(node.FileInfo.Name);
+                var find = right.FindChild(node.Name);
                 if (find != null)
                 {
                     check.Add(find.Id);
-                    if (node.FileInfo.IsDirectory)
+                    if (node.IsDirectory)
                         RecursiveCompareTo(differences, node, find);
-                    else if (!CompareDifferences(node.FileInfo, find.FileInfo, out FileListDifference diff))
+                    else if (!CompareDifferences(node, find, out FileListDifference diff))
                         differences.Add(diff);
                 }
                 else
@@ -291,7 +273,7 @@ namespace Bit.ConsoleApp
                     differences.Add(new FileListDifference()
                     {
                         Difference = FileListDifferences.RightMissing,
-                        Left = node.FileInfo
+                        Left = node
                     });
                     continue;
                 }
@@ -302,12 +284,12 @@ namespace Bit.ConsoleApp
                 if (check.Contains(node.Id))
                     continue;
 
-                var find = left.FindChild(node.FileInfo.Name);
+                var find = left.FindChild(node.Name);
                 if (find != null)
                 {
-                    if (node.FileInfo.IsDirectory)
+                    if (node.IsDirectory)
                         RecursiveCompareTo(differences, find, node);
-                    else if (!CompareDifferences(find.FileInfo, node.FileInfo, out FileListDifference diff))
+                    else if (!CompareDifferences(find, node, out FileListDifference diff))
                         differences.Add(diff);
                 }
                 else
@@ -315,7 +297,7 @@ namespace Bit.ConsoleApp
                     differences.Add(new FileListDifference()
                     {
                         Difference = FileListDifferences.LeftMissing,
-                        Right = node.FileInfo
+                        Right = node
                     });
                     continue;
                 }
@@ -335,7 +317,7 @@ namespace Bit.ConsoleApp
         {
             foreach (var folder in System.IO.Directory.GetDirectories(path))
             {
-                var node = new FileListNode(parent, new FileInfo(System.IO.Path.GetFileName(folder), true, 0, new DateTime(0), new DateTime(0)));
+                var node = new FileListNode(parent, System.IO.Path.GetFileName(folder), true, 0, new DateTime(0), new DateTime(0));
                 parent.AddChild(node);
                 RecursiveReadFolder(node, folder);
             }
@@ -344,13 +326,13 @@ namespace Bit.ConsoleApp
             {
                 var fi = new System.IO.FileInfo(filename);
 
-                parent.AddChild(new FileListNode(parent,
-                    new FileInfo(
-                        System.IO.Path.GetFileName(filename),
-                        false,
-                        fi.Length,
-                        fi.CreationTimeUtc,
-                        fi.LastWriteTimeUtc)));
+                parent.AddChild(new FileListNode(
+                    parent,
+                    System.IO.Path.GetFileName(filename),
+                    false,
+                    fi.Length,
+                    fi.CreationTimeUtc,
+                    fi.LastWriteTimeUtc));
             }
         }
 
@@ -365,11 +347,10 @@ namespace Bit.ConsoleApp
                 var creationTimeUtc = DateTime.SpecifyKind(new DateTime(br.ReadInt64()), DateTimeKind.Utc);
                 var lastWriteTimeUtc = DateTime.SpecifyKind(new DateTime(br.ReadInt64()), DateTimeKind.Utc);
 
-                var fileInfo = new FileInfo(name, isDirectory, length, creationTimeUtc, lastWriteTimeUtc);
-                var node = new FileListNode(parent, fileInfo);
+                var node = new FileListNode(parent, name, isDirectory, length, creationTimeUtc, lastWriteTimeUtc);
                 parent.AddChild(node);
 
-                if (fileInfo.IsDirectory)
+                if (node.IsDirectory)
                     RecursiveReadStream(br, node);
             }
         }
